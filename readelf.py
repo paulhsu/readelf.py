@@ -91,6 +91,7 @@ ELFDATA2MSB   2
 filename = 'a.out'
 elf_class = None
 end_char = None
+shidx_strtab = None
 def readElfHeader(f):
   global elf_class
   global end_char
@@ -162,9 +163,14 @@ def readShHeaders(f,elf_hdr):
   shstrndx_hdr = sh_hdrs[elf_hdr['e_shstrndx']]
   f.seek(shstrndx_hdr['sh_offset'])
   shstr = f.read(shstrndx_hdr['sh_size'])
+  idx = 0
   for hdr in sh_hdrs:
     offset = hdr['sh_name_idx']
     hdr['sh_name'] = shstr[offset:offset+shstr[offset:].index(chr(0x0))]
+    global shidx_strtab
+    if '.strtab' == hdr['sh_name']:
+      shidx_strtab = idx
+    idx += 1
   return sh_hdrs
 
 
@@ -228,26 +234,12 @@ typedef struct {
 } Elf64_Sym;
 """
 
-
-#file_header = dict(zip(elfheader_member,struct.unpack(elf_headerfmt,data)))
-#data = f.read(struct.calcsize(elf_headerfmt))
-#(e_ident, e_type, e_machine, e_version, e_entry,
-  #e_phoff, e_shoff, e_flags, e_ehsize, ephentsize,
-  #e_phnum, e_shentsize, e_shnum, e_shstrndx) = struct.unpack(elf_headerfmt,data)
-
-#d = {}
-#(d['e_ident'], d['e_type'], d['e_machine'], d['e_version'], d['e_entry'],
-#d['e_phoff'], d['e_shoff'], d['e_flags'], d['e_ehsize'], d['ephentsize'],
-#d['e_phnum'], d['e_shentsize'], d['e_shnum'], d['e_shstrndx']) = struct.unpack(elf_headerfmt,data)
-
 #ident = {0:'EI_MAG0',1:'EI_MAG1',2:'EI_MAG2',3:'EI_MAG3',4:'EI_CLASS',5:'EI_DATA',6:'EI_VERSION',7:'EI_PAD',16:'EI_NIDENT'}
 
 def isElfFile(ident):
     if ident[:4] == '\x7fELF':
         return True
     return False
-
-#print isElfFile(file_header['e_ident'])
 
 def printReadElfHeader(elf_header):
   print "ELF Header:"
@@ -304,9 +296,6 @@ def printElfHeader(elf_hdr):
   print "  Size of section headers:\t\t%d (bytes)" % elf_hdr['e_shentsize']
   print "  Number of section headers:\t\t%d" % elf_hdr['e_shnum']
   print "  Section header string table index:\t%d" % elf_hdr['e_shstrndx']
-
-
-
 
 """
 e_type
@@ -379,8 +368,10 @@ def printShHeaders(f,elf_hdr,sh_hdrs):
        {0:'NULL', 1:'PROGBITS', 2:'SYMTAB', 3:'STRTAB',
         4:'RELA', 5:'HASH', 6:'DYNAMIC', 7:'NOTE',
         8:'NOBITS', 9:'REL', 10:'SHLIB', 11:'DYNSYM',
-        0x60000000:'LOOS', 0x6ffffffe:'VERNEED', 0x6ffffff6:'GNU_HASH', 0x6fffffff:'HIOS',
-        0x7000000:'LOPROC', 0x7ffffff:'HIPROC',
+        14:'INIT_ARRAY', 15:'FINI_ARRAY', 16:'PREINIT_ARRAY', 17:'GROUP', 18:'SYMTAB SECTION INDICIES', 
+        0x60000000:'LOOS', 0x6ffffff5:'GNU_ATTRIBUTES', 0x6ffffff6:'GNU_HASH', 0x6ffffff7:'GNU_LIBLIST',  
+        0x6ffffffd:'VERDEF', 0x6ffffffe:'VERNEED', 0x6fffffff:'VERSYM', 0x6ffffff0:'VERSYM', 
+        0x7000000:'LOPROC', 0x7ffffffd:'AUXILIARY', 0x7ffffff:'FILTER',
         0x80000000:'LOUSER', 0xffffffff:'HIUSER'}[header['sh_type']], 
         header['sh_addr'],header['sh_offset'],header['sh_size'], 
         header['sh_entsize'],
@@ -392,8 +383,6 @@ def printShHeaders(f,elf_hdr,sh_hdrs):
   I (info), L (link order), G (group), x (unknown)
 O (extra OS processing required) o (OS specific), p (processor specific)
  """
-
-
 """
 There are 30 section headers, starting at offset 0x1128:
 
@@ -464,8 +453,8 @@ def readsymtab(f,elf_hdr,sh_hdrs):
   fmt32 = 'IIIBBH'
   fmt64 = 'IBBHQQ'
   fields = None
-  fields32 = ['st_name','st_value','st_size','st_info','st_other','st_shndx']
-  fields64 = ['st_name','st_info','st_other','st_shndx','st_value','st_size']
+  fields32 = ['st_name_idx','st_value','st_size','st_info','st_other','st_shndx']
+  fields64 = ['st_name_idx','st_info','st_other','st_shndx','st_value','st_size']
   if elf_class == 32:
     fmt = fmt32
     fields = fields32
@@ -473,6 +462,9 @@ def readsymtab(f,elf_hdr,sh_hdrs):
     fmt = fmt64
     fields = fields64
   fmt = end_char + fmt
+  strtab_hdr = sh_hdrs[shidx_strtab]
+  f.seek(strtab_hdr['sh_offset'])
+  strtab_str = f.read(strtab_hdr['sh_size'])
   symtabs = []
   for hdr in sh_hdrs:
     tab = []
@@ -481,7 +473,13 @@ def readsymtab(f,elf_hdr,sh_hdrs):
       tabsize = hdr['sh_size']
       while tabsize != 0:
         entsize = struct.calcsize(fmt)
-        tab.append(dict(zip(fields,struct.unpack(fmt,f.read(entsize)))))
+        syment = dict(zip(fields,struct.unpack(fmt,f.read(entsize))))
+        tab.append(syment)
+        syment['st_bind'] = syment['st_info'] >> 4
+        syment['st_type'] = syment['st_info'] & 0xf
+        syment['st_vis'] = syment['st_other'] & 0x3
+        offset = syment['st_name_idx']
+        syment['st_name'] = strtab_str[offset:offset+strtab_str[offset:].index(chr(0x0))]
         tabsize -= entsize
       symtabs.append([hdr['sh_name'],tab])
   return symtabs
@@ -492,15 +490,41 @@ def printPhHeaders(ph_headers):
 def printhelp(prog_name):
   print '%s' % prog_name
 
+def printSymtabs(symtabs):
+  for tab in symtabs:
+    print "Symbol table '%s' contains %d entries:" % (tab[0],len(tab[1]))
+    print "  %4s: %8s %4s %-8s %-8s %8s %3s %s" % (
+    'Num', 'Value', 'Size', 'Type', 'Bind', 'Vis', 'Ndx', 'Name')
+    idx = 0
+    for sym in tab[1]:
+      try:
+        shndx = {0:'UND', 0xff00:'LOPROC', 0xff1f:'HIPROC', 0xfff1:'ABS', 0xfff2:'COM'}[sym['st_shndx']]
+      except KeyError:
+        shndx = str(sym['st_shndx'])
+      print "  %4d: %08X %4d %-8s %-8s %8s %3s %s" % ( idx,
+        sym['st_value'],
+        sym['st_size'],
+        {0:'NOTYPE',1:'OBJECT',2:'FUNC',3:'SECTION',4:'FILE',
+         5:'COMMON', 6:'TLS',8:'RELC', 9:'SRELC',
+         10:'LOOS',12:'HIOS',13:'LOPROC',15:'HIPROC'}[sym['st_type']],
+        {0:'LOCAL',1:'GLOBAL',2:'WEAK',
+        10:'LOOS',12:'HIOS',13:'LOPROC',15:'HIPROC'}[sym['st_bind']],
+        {0:'DEFAULT', 1:'INTERNAL', 2:'HIDDEN', 3:'PROTECTED'}[sym['st_vis']],
+        shndx,
+        sym['st_name'])
+      idx+=1
+      
+
 if __name__ == '__main__':
-  open_name = 'a.out'
+  #open_name = 'a.out'
+  open_name = 'elf32.elf'
   
   if len(sys.argv) > 2:
     print_help(sys.argv[0])
   elif len(sys.argv) == 2:
     open_name = sys.argv[1]
 
-  f = open(filename,'rb')
+  f = open(open_name,'rb')
   
   hdr = readElfHeader(f)
   
@@ -509,8 +533,7 @@ if __name__ == '__main__':
   shs = readShHeaders(f,hdr)
 
   printShHeaders(f,hdr,shs)
-  
 
   symtabs = readsymtab(f,hdr,shs)
-  print symtabs
+  printSymtabs(symtabs)
 
